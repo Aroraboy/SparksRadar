@@ -15,7 +15,6 @@ DOWNLOAD_DIR = BASE_DIR / "downloads"
 SPREADSHEET_ID: str = ""
 
 SHEET_COLUMNS: list[str] = [
-    "Project Name",
     "Case Number",
     "Type",
     "Address",

@@ -69,8 +69,14 @@ def _get_or_create_sheet(
         ws = spreadsheet.add_worksheet(
             title=sheet_name, rows=500, cols=len(SHEET_COLUMNS)
         )
-        ws.append_row(SHEET_COLUMNS, value_input_option="RAW")
-        logger.info("Created new sheet tab: %s", sheet_name)
+    # Ensure header row exists
+    first_row = ws.row_values(1)
+    if not first_row or first_row != SHEET_COLUMNS:
+        if not first_row:
+            ws.append_row(SHEET_COLUMNS, value_input_option="RAW")
+        else:
+            ws.update("A1", [SHEET_COLUMNS], value_input_option="RAW")
+        logger.info("Added headers to sheet tab: %s", sheet_name)
     return ws
 
 
@@ -79,8 +85,8 @@ def _existing_keys(ws: gspread.Worksheet) -> set[tuple[str, str]]:
     rows = ws.get_all_values()
     keys: set[tuple[str, str]] = set()
     for row in rows[1:]:
-        if len(row) >= 4:
-            keys.add((row[1].strip(), row[3].strip()))
+        if len(row) >= 3:
+            keys.add((row[0].strip(), row[2].strip()))
     return keys
 
 
@@ -109,7 +115,6 @@ def write_rows(
             continue
         existing.add(key)  # prevent intra-batch dupes
         new_rows.append([
-            r.get("project_name", "Submittal Tracker"),
             r.get("case_number", ""),
             r.get("project_type", ""),
             r.get("address", ""),
