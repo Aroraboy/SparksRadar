@@ -30,6 +30,7 @@ from submittal_tracker.config import CITIES
 from submittal_tracker.scraper import discover_documents
 from submittal_tracker.extractor import download_pdf, extract_from_pdf
 from submittal_tracker.sheets_writer import write_rows
+from submittal_tracker.webhook_writer import send_submittal_records
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,6 +91,11 @@ async def run(city: str, spreadsheet_id: str, year_filter: int | None = None) ->
         logger.info(
             "  → %d new rows from %s (%d total so far)", written, doc.date_label, total_written
         )
+
+        # Send to Replit webhook
+        webhook_sent = send_submittal_records(row_dicts, city=city)
+        if webhook_sent:
+            logger.info("  → Webhook: %d record(s) sent", webhook_sent)
 
         # Polite delay between documents
         time.sleep(1.5)

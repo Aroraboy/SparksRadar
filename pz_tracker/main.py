@@ -48,6 +48,7 @@ from scrapers.standard_html import StandardHtmlScraper
 from utils.downloader import download_pdf
 from writers.excel_writer import write_records
 from writers.google_sheets_writer import write_records_to_sheets, copy_excel_to_sheets
+from writers.webhook_writer import send_pz_records
 
 load_dotenv()
 
@@ -224,6 +225,11 @@ def run_pipeline(cities: dict[str, dict] | None = None, headed: bool = False) ->
             logger.info("Google Sheets: %d record(s) for %s", gs_written, city)
         except Exception:
             logger.exception("Failed to write to Google Sheets for %s", city)
+
+        # Send to Replit webhook
+        webhook_sent = send_pz_records(records, city=city)
+        if webhook_sent:
+            logger.info("Webhook: %d record(s) sent for %s", webhook_sent, city)
 
         summary[city] = written
 
