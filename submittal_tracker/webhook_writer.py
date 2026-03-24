@@ -24,7 +24,7 @@ def send_submittal_records(records: list[dict], city: str) -> int:
         logger.debug("Webhook not configured – skipping")
         return 0
 
-    url = f"{webhook_url}/webhooks/permits"
+    url = f"{webhook_url}/api/webhooks/permits"
     payload = {
         "source": "submittal_tracker",
         "city": city,
