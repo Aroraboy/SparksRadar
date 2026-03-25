@@ -3,7 +3,7 @@ name: Submittal Tracker
 on:
   schedule:
     # Mon + Thu at 7:00 AM CDT (UTC-5) = 12:00 UTC
-    - cron: '0 12 * * 1,4'
+    - cron: "0 12 * * 1,4"
   workflow_dispatch:
 
 jobs:
@@ -18,8 +18,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: 'pip'
+          python-version: "3.12"
+          cache: "pip"
           cache-dependency-path: submittal_tracker/requirements.txt
 
       - name: Install dependencies
