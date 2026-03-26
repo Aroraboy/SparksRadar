@@ -765,86 +765,205 @@ def run_lubbock():
 
 # ── 9. DALLAS ─────────────────────────────────────────────────────────────────
 def run_dallas():
-    """Dallas: monthly permit table reports from development services."""
-    log.info("Dallas: fetching permit reports …")
-    # Dallas publishes monthly Excel/PDF permit tables
-    # Try to discover links from the reports page
-    client = _http()
-    rows = []
+    """Dallas: monthly XLSX permit reports from Development Services.
 
-    # Try direct document links pattern (Dallas uses SharePoint-style URLs)
-    # FY2025-2026 runs Oct 2025 - Sep 2026
-    months_2026 = [
-        ("January 2026", "Jan"),
-        ("February 2026", "Feb"),
-        ("March 2026", "Mar"),
-    ]
-    base = "https://dallascityhall.com/departments/sustainabledevelopment/Pages"
-    # Try fetching the main reports page to get actual links
+    Reports page publishes FY-based XLSX files. FY 25-26 runs Oct 2025 – Sep 2026.
+    We scrape the reports page, grab all Permits_Table.xlsx links, download them,
+    and filter rows with dates >= CUTOFF.
+    """
+    log.info("Dallas: scraping DevServices reports page …")
+    client = _http()
+    rows: list[list[str]] = []
+    reports_url = (
+        "https://dallascityhall.com/departments/sustainabledevelopment/"
+        "Pages/Reports.aspx"
+    )
     try:
-        resp = client.get(f"{base}/Reports.aspx")
-        if resp.status_code == 200:
-            page_text = resp.text
-            # Look for Excel/PDF links
-            import re
-            links = re.findall(r'href=["\']([^"\']*(?:permit|table)[^"\']*\.(?:xlsx|xls|pdf))["\']', page_text, re.I)
-            for link in links:
-                if not link.startswith("http"):
-                    link = f"https://dallascityhall.com{link}"
-                log.info("Dallas: found link %s", link)
-                try:
-                    resp2 = client.get(link)
-                    if resp2.status_code == 200:
-                        if link.lower().endswith(('.xlsx', '.xls')):
-                            rows.extend(_parse_excel_generic(resp2.content, "Dallas", link))
-                        elif link.lower().endswith('.pdf'):
-                            rows.extend(_parse_pdf_generic(resp2.content, "Dallas", link))
-                except Exception as e:
-                    log.warning("Dallas link %s: %s", link, e)
+        resp = client.get(reports_url)
+        if resp.status_code != 200:
+            log.warning("Dallas: reports page returned %d", resp.status_code)
+            return rows
+        # Collect all XLSX links (Permits_Table + COs + Demolition + Solar)
+        xlsx_links = re.findall(
+            r'href=["\']([^"\']*(?:Permits_Table|COs_MonthOf)[^"\']*\.xlsx)["\']',
+            resp.text, re.I,
+        )
+        for link in xlsx_links:
+            if not link.startswith("http"):
+                link = f"https://dallascityhall.com{link}"
+            try:
+                r2 = client.get(link)
+                if r2.status_code != 200:
+                    continue
+                wb = openpyxl.load_workbook(io.BytesIO(r2.content), data_only=True)
+                for sn in wb.sheetnames:
+                    ws = wb[sn]
+                    # Detect header row
+                    headers = []
+                    hrow = 0
+                    for ri in range(1, min(10, ws.max_row + 1)):
+                        cells = [safe(c.value).lower() for c in ws[ri]]
+                        if any(k in " ".join(cells) for k in ["permit", "address", "number"]):
+                            headers = [safe(c.value) for c in ws[ri]]
+                            hrow = ri
+                            break
+                    if not headers:
+                        continue
+                    hl = [h.lower() for h in headers]
+
+                    def _col(kws):
+                        for kw in kws:
+                            for j, h in enumerate(hl):
+                                if kw in h:
+                                    return j
+                        return None
+
+                    ci_perm = _col(["permit", "number", "#"])
+                    ci_type = _col(["type", "category"])
+                    ci_addr = _col(["address", "location"])
+                    ci_desc = _col(["description", "work", "scope"])
+                    ci_stat = _col(["status"])
+                    ci_date = _col(["issued", "date"])
+                    ci_val  = _col(["value", "valuation", "cost"])
+                    ci_cont = _col(["contractor"])
+
+                    for data_row in ws.iter_rows(min_row=hrow + 1, values_only=True):
+                        if not data_row or not any(data_row):
+                            continue
+                        def _g(idx):
+                            if idx is not None and idx < len(data_row):
+                                return data_row[idx]
+                            return ""
+                        # Date filter
+                        raw_date = _g(ci_date)
+                        dt = parse_date(raw_date)
+                        if dt and dt < CUTOFF:
+                            continue
+                        permit = safe(_g(ci_perm))
+                        if not permit:
+                            continue
+                        ptype = safe(_g(ci_type))
+                        addr = safe(_g(ci_addr))
+                        desc = safe(_g(ci_desc))
+                        status = safe(_g(ci_stat))
+                        date_s = fmt_date(dt) if dt else safe(raw_date)[:10]
+                        val = safe(_g(ci_val))
+                        contractor = safe(_g(ci_cont))
+                        notes_parts = []
+                        if val:
+                            notes_parts.append(f"Value: {val}")
+                        if contractor:
+                            notes_parts.append(f"Contractor: {contractor}")
+                        notes = "; ".join(notes_parts)
+                        pri = priority(f"{ptype} {desc}")
+                        rows.append([permit, ptype, addr, desc, status, date_s,
+                                     notes, "Dallas DevServices XLSX", pri])
+            except Exception as e:
+                log.warning("Dallas XLSX %s: %s", link.split("/")[-1], e)
     except Exception as e:
         log.error("Dallas reports page: %s", e)
 
     if not rows:
-        log.warning("Dallas: no data extracted (may need Playwright for dynamic content)")
-
-    if rows:
+        log.warning("Dallas: no 2026 data (FY 25-26 reports not yet published)")
+    else:
+        log.info("Dallas: %d records", len(rows))
         write_city("Dallas", rows)
     return rows
 
 
 # ── 10. CORPUS CHRISTI ────────────────────────────────────────────────────────
 def run_corpus_christi():
-    """Corpus Christi: fiscal permit history reports by month."""
-    log.info("Corpus Christi: fetching permit reports …")
+    """Corpus Christi: fiscal permit & CO reports (direct XLSX download)."""
+    log.info("Corpus Christi: fetching permit & CO reports …")
+    BASE = "https://www.corpuschristitx.gov"
+    PERMIT_URLS = [
+        f"{BASE}/media/ba1nbcm4/permit-report-jan-2026-excel-version.xlsx",
+        f"{BASE}/media/mrlcnq1a/permit-report-february-2026-excel-version.xlsx",
+    ]
+    CO_URLS = [
+        f"{BASE}/media/riplqktg/coo-report-jan-2026-excel-version.xlsx",
+        f"{BASE}/media/hnhdovfv/coo-report-february-2026-excel-version.xlsx",
+    ]
     client = _http()
-    rows = []
-    url = "https://www.corpuschristitx.gov/department:directory/development:services/reports/fiscal:permit:history:reports:by:month/"
-    try:
-        resp = client.get(url)
-        if resp.status_code == 200:
-            # Look for PDF/Excel download links
-            links = re.findall(r'href=["\']([^"\']*(?:permit|report)[^"\']*\.(?:xlsx|xls|pdf|csv))["\']', resp.text, re.I)
-            for link in links:
-                if not link.startswith("http"):
-                    link = f"https://www.corpuschristitx.gov{link}"
-                # Filter for 2026 links
-                if "2026" not in link and "26" not in link.split("/")[-1]:
-                    continue
-                log.info("Corpus Christi: found link %s", link)
-                try:
-                    resp2 = client.get(link)
-                    if resp2.status_code == 200:
-                        if link.lower().endswith(('.xlsx', '.xls')):
-                            rows.extend(_parse_excel_generic(resp2.content, "Corpus Christi", link))
-                        elif link.lower().endswith('.pdf'):
-                            rows.extend(_parse_pdf_generic(resp2.content, "Corpus Christi", link))
-                except Exception as e:
-                    log.warning("Corpus Christi link %s: %s", link, e)
-    except Exception as e:
-        log.error("Corpus Christi: %s", e)
+    rows: list[list[str]] = []
 
-    if not rows:
-        log.warning("Corpus Christi: no data extracted (may need Playwright)")
+    # ── Permit reports (header row 8) ──
+    for url in PERMIT_URLS:
+        try:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                log.warning("Corpus Christi permit %s → %s", url, resp.status_code)
+                continue
+            wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+            ws = wb.active
+            hdr = [safe(c) for c in next(ws.iter_rows(min_row=8, max_row=8, values_only=True))]
+            h = {v.lower(): i for i, v in enumerate(hdr)}
+            for vals in ws.iter_rows(min_row=9, values_only=True):
+                if not vals or not any(vals):
+                    continue
+                def g(key):
+                    idx = h.get(key)
+                    return safe(vals[idx]) if idx is not None and idx < len(vals) else ""
+                permit = g("permit")
+                addr = " ".join(filter(None, [g("str no"), g("str name"), g("city"), g("zip")]))
+                desc = " ".join(filter(None, [g("project"), g("work type"), g("sub work")]))
+                issued = g("issued")
+                dt = parse_date(issued)
+                if dt and dt < CUTOFF:
+                    continue
+                rows.append([
+                    permit,
+                    g("appl type"),
+                    addr,
+                    desc,
+                    g("status"),
+                    fmt_date(dt) if dt else issued,
+                    f"SqFt={g('sq ft')} Val={g('value')}",
+                    url.split("/")[-1],
+                    priority(desc + " " + g("appl type")),
+                ])
+        except Exception as e:
+            log.warning("Corpus Christi permit %s: %s", url, e)
+
+    # ── CO reports (header row 8) ──
+    for url in CO_URLS:
+        try:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                log.warning("Corpus Christi CO %s → %s", url, resp.status_code)
+                continue
+            wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+            ws = wb.active
+            hdr = [safe(c) for c in next(ws.iter_rows(min_row=8, max_row=8, values_only=True))]
+            h = {v.lower(): i for i, v in enumerate(hdr)}
+            for vals in ws.iter_rows(min_row=9, values_only=True):
+                if not vals or not any(vals):
+                    continue
+                def g(key):
+                    idx = h.get(key)
+                    return safe(vals[idx]) if idx is not None and idx < len(vals) else ""
+                apno = g("apno")
+                addr = " ".join(filter(None, [g("stno"), g("predir"), g("stname"), g("suffix"), g("zip")]))
+                desc = " ".join(filter(None, [g("worktype"), g("descript")]))
+                co_date = g("coodttm")
+                dt = parse_date(co_date)
+                if dt and dt < CUTOFF:
+                    continue
+                rows.append([
+                    apno,
+                    g("aptype") + " (CO)",
+                    addr,
+                    desc,
+                    g("stat"),
+                    fmt_date(dt) if dt else co_date,
+                    f"Area={g('bldgarea')} Val={g('declvltn')}",
+                    url.split("/")[-1],
+                    priority(desc + " " + g("aptype")),
+                ])
+        except Exception as e:
+            log.warning("Corpus Christi CO %s: %s", url, e)
+
+    log.info("Corpus Christi: %d rows total", len(rows))
     if rows:
         write_city("Corpus Christi", rows)
     return rows
@@ -852,35 +971,49 @@ def run_corpus_christi():
 
 # ── 11. GRAND PRAIRIE ─────────────────────────────────────────────────────────
 def run_grand_prairie():
-    """Grand Prairie: building permits report page."""
-    log.info("Grand Prairie: fetching permit reports …")
-    client = _http()
-    rows = []
+    """Grand Prairie: building permits report page (Playwright for 403 bypass)."""
+    from playwright.sync_api import sync_playwright
+    log.info("Grand Prairie: fetching permit reports via Playwright …")
+    rows: list[list[str]] = []
     url = "https://www.gptx.org/Departments/Building-Inspections/Building-Permits-Report"
     try:
-        resp = client.get(url)
-        if resp.status_code == 200:
-            links = re.findall(r'href=["\']([^"\']*(?:permit|report|building)[^"\']*\.(?:xlsx|xls|pdf|csv))["\']', resp.text, re.I)
-            for link in links:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(3000)
+            html = page.content()
+
+            # Find document links (pdf/xlsx) with 2026 in URL or text
+            links = re.findall(r'href=["\']([^"\']*\.(?:xlsx|xls|pdf|csv))["\']', html, re.I)
+            links_2026 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', html, re.I)
+            all_links = list({l for l in (links + links_2026)})
+            for link in all_links:
                 if not link.startswith("http"):
                     link = f"https://www.gptx.org{link}"
                 if "2026" not in link and "26" not in link.split("/")[-1]:
                     continue
+                # Skip non-document links (CSS, JS, general nav)
+                if any(skip in link.lower() for skip in [".css", ".js", "bond-election", "news-articles"]):
+                    continue
                 log.info("Grand Prairie: found link %s", link)
                 try:
-                    resp2 = client.get(link)
-                    if resp2.status_code == 200:
-                        if link.lower().endswith(('.xlsx', '.xls')):
-                            rows.extend(_parse_excel_generic(resp2.content, "Grand Prairie", link))
-                        elif link.lower().endswith('.pdf'):
-                            rows.extend(_parse_pdf_generic(resp2.content, "Grand Prairie", link))
+                    resp = ctx.request.get(link)
+                    if resp.status != 200:
+                        continue
+                    body = resp.body()
+                    if link.lower().endswith(('.xlsx', '.xls')):
+                        rows.extend(_parse_excel_generic(body, "Grand Prairie", link))
+                    elif link.lower().endswith('.pdf'):
+                        rows.extend(_parse_pdf_generic(body, "Grand Prairie", link))
                 except Exception as e:
                     log.warning("Grand Prairie link %s: %s", link, e)
+            browser.close()
     except Exception as e:
         log.error("Grand Prairie: %s", e)
 
-    if not rows:
-        log.warning("Grand Prairie: no data extracted (may need Playwright)")
+    log.info("Grand Prairie: %d rows", len(rows))
     if rows:
         write_city("Grand Prairie", rows)
     return rows
@@ -888,36 +1021,137 @@ def run_grand_prairie():
 
 # ── 12. ROUND ROCK ────────────────────────────────────────────────────────────
 def run_round_rock():
-    """Round Rock: monthly PDF inspection reports."""
-    log.info("Round Rock: fetching inspection reports …")
-    client = _http()
-    rows = []
+    """Round Rock: building inspection forms & reports (Playwright for 403 bypass)."""
+    from playwright.sync_api import sync_playwright
+    log.info("Round Rock: fetching inspection reports via Playwright …")
+    rows: list[list[str]] = []
     url = "https://www.roundrocktexas.gov/city-departments/planning-and-development-services/building-inspection/forms-and-reports/"
+
+    def _parse_rr_pdf(body: bytes, source: str) -> list[list[str]]:
+        """Parse Round Rock monthly permit PDF.
+        Each permit block starts with a permit number like ACC26-00000.
+        Format: PERMIT_NUM TYPE ADDRESS $VALUATION
+                ISSUED_DATE SUB_TYPE PARCEL FEES
+                APPLIED_DATE STATUS SUBDIVISION PAID
+                Contractor / Description / Owner lines
+        """
+        parsed = []
+        pdf = pdfplumber.open(io.BytesIO(body))
+        full_text = ""
+        for pg in pdf.pages:
+            t = pg.extract_text()
+            if t:
+                full_text += t + "\n"
+        # Split on permit number pattern (e.g., ACC26-00000, COM26-00003, RES26-00123)
+        permit_re = re.compile(r'^([A-Z]{2,5}\d{2}-\d{4,6})\s+(.+)', re.MULTILINE)
+        blocks = permit_re.split(full_text)
+        # blocks: [pre, num, rest, num, rest, ...]
+        i = 1
+        while i + 1 < len(blocks):
+            permit_num = blocks[i].strip()
+            block_text = blocks[i + 1].strip()
+            i += 2
+            lines = block_text.split("\n")
+            if not lines:
+                continue
+            # First line: PERMIT_TYPE ADDRESS $VALUATION
+            first = lines[0]
+            # Extract valuation from end
+            val_m = re.search(r'\$[\d,]+\.?\d*$', first)
+            valuation = val_m.group(0) if val_m else ""
+            type_addr = first[:val_m.start()].strip() if val_m else first
+
+            # Try to separate permit type from address
+            # Common types: Commercial Building, Residential SF, etc.
+            addr = type_addr
+            ptype = ""
+            for kw in ["Commercial", "Residential", "Industrial"]:
+                idx = type_addr.find(kw)
+                if idx == 0:
+                    # Find where address starts (a number after type words)
+                    addr_m = re.search(r'\d+\s+\w', type_addr)
+                    if addr_m:
+                        ptype = type_addr[:addr_m.start()].strip()
+                        addr = type_addr[addr_m.start():].strip()
+                    break
+
+            # Second line might have issued date, sub type, etc.
+            issued = ""
+            status = ""
+            desc_parts = []
+            for ln in lines[1:]:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                # Check for date pattern at start
+                dt_m = re.match(r'(\d{1,2}/\d{1,2}/\d{4})', ln)
+                if dt_m:
+                    if not issued:
+                        issued = dt_m.group(1)
+                        rest = ln[dt_m.end():].strip()
+                        # Look for status keywords
+                        for st in ["ISSUED", "REVIEW", "FEES_DUE", "EXPIRED", "FINALED", "CLOSED"]:
+                            if st in rest:
+                                status = st
+                                break
+                    continue
+                if ln.startswith("Contractor Name:") or ln.startswith("Owner Name:") or ln.startswith("Owner Info:"):
+                    continue
+                if ln.startswith(("PERMIT NUMBER", "ISSUED DATE", "APPLIED DATE")):
+                    continue
+                # Remaining lines are description
+                desc_parts.append(ln)
+
+            desc = " ".join(desc_parts)[:200]
+            dt = parse_date(issued)
+            if dt and dt < CUTOFF:
+                continue
+            parsed.append([
+                permit_num, ptype, addr, desc, status,
+                fmt_date(dt) if dt else issued,
+                f"Val={valuation}" if valuation else "",
+                source.split("/")[-1], priority(f"{ptype} {desc}"),
+            ])
+        return parsed
+
     try:
-        resp = client.get(url)
-        if resp.status_code == 200:
-            # Look for PDF links with 2026 in the URL or name
-            links = re.findall(r'href=["\']([^"\']*(?:monthly|periodic|permit|report)[^"\']*\.pdf)["\']', resp.text, re.I)
-            # Also check for any 2026 links
-            all_links = re.findall(r'href=["\']([^"\']*2026[^"\']*\.pdf)["\']', resp.text, re.I)
-            links = list(set(links + all_links))
-            for link in links:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(3000)
+            html = page.content()
+
+            links = re.findall(r'href=["\']([^"\']*\.(?:xlsx|xls|pdf|csv))["\']', html, re.I)
+            links_2026 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', html, re.I)
+            all_links = list({l for l in (links + links_2026)})
+            for link in all_links:
                 if not link.startswith("http"):
                     link = f"https://www.roundrocktexas.gov{link}"
-                if "2026" not in link:
+                if "2026" not in link and "26" not in link.split("/")[-1]:
                     continue
-                log.info("Round Rock: found link %s", link)
+                # Skip December 2025 and Periodic summary reports
+                if "december" in link.lower() or "periodic" in link.lower():
+                    continue
+                log.info("Round Rock: downloading %s", link)
                 try:
-                    resp2 = client.get(link)
-                    if resp2.status_code == 200:
-                        rows.extend(_parse_pdf_generic(resp2.content, "Round Rock", link))
+                    resp = ctx.request.get(link)
+                    if resp.status != 200:
+                        log.warning("Round Rock: %s → %s", link, resp.status)
+                        continue
+                    body = resp.body()
+                    if link.lower().endswith('.pdf'):
+                        rows.extend(_parse_rr_pdf(body, link))
+                    elif link.lower().endswith(('.xlsx', '.xls')):
+                        rows.extend(_parse_excel_generic(body, "Round Rock", link))
                 except Exception as e:
                     log.warning("Round Rock link %s: %s", link, e)
+            browser.close()
     except Exception as e:
         log.error("Round Rock: %s", e)
 
-    if not rows:
-        log.warning("Round Rock: no data extracted (may need Playwright for dynamic links)")
+    log.info("Round Rock: %d rows", len(rows))
     if rows:
         write_city("Round Rock", rows)
     return rows
@@ -925,36 +1159,47 @@ def run_round_rock():
 
 # ── 13. CARROLLTON ────────────────────────────────────────────────────────────
 def run_carrollton():
-    """Carrollton: archive permit reports page."""
-    log.info("Carrollton: fetching archive permit reports …")
-    client = _http()
-    rows = []
+    """Carrollton: archive permit reports page (Playwright for 403 bypass)."""
+    from playwright.sync_api import sync_playwright
+    log.info("Carrollton: fetching archive permit reports via Playwright …")
+    rows: list[list[str]] = []
     url = "https://www.cityofcarrollton.com/departments/departments-a-f/building-inspection/building-inspection-reports/archive-permit-reports"
     try:
-        resp = client.get(url)
-        if resp.status_code == 200:
-            links = re.findall(r'href=["\']([^"\']*(?:permit|report)[^"\']*\.(?:xlsx|xls|pdf|csv))["\']', resp.text, re.I)
-            all_links_2026 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', resp.text, re.I)
-            links = list(set(links + all_links_2026))
-            for link in links:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(3000)
+            html = page.content()
+
+            links = re.findall(r'href=["\']([^"\']*\.(?:xlsx|xls|pdf|csv))["\']', html, re.I)
+            links_2026 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', html, re.I)
+            all_links = list({l for l in (links + links_2026)})
+            for link in all_links:
                 if not link.startswith("http"):
                     link = f"https://www.cityofcarrollton.com{link}"
+                if "2026" not in link and "26" not in link.split("/")[-1]:
+                    continue
                 log.info("Carrollton: found link %s", link)
                 try:
-                    resp2 = client.get(link)
-                    if resp2.status_code == 200:
-                        ct = resp2.headers.get("content-type", "")
-                        if "spreadsheet" in ct or "excel" in ct or link.endswith(('.xlsx', '.xls')):
-                            rows.extend(_parse_excel_generic(resp2.content, "Carrollton", link))
-                        elif "pdf" in ct or link.endswith('.pdf'):
-                            rows.extend(_parse_pdf_generic(resp2.content, "Carrollton", link))
+                    resp = ctx.request.get(link)
+                    if resp.status != 200:
+                        log.warning("Carrollton: %s → %s", link, resp.status)
+                        continue
+                    body = resp.body()
+                    ct = resp.headers.get("content-type", "")
+                    if "spreadsheet" in ct or "excel" in ct or link.endswith(('.xlsx', '.xls')):
+                        rows.extend(_parse_excel_generic(body, "Carrollton", link))
+                    elif "pdf" in ct or link.endswith('.pdf'):
+                        rows.extend(_parse_pdf_generic(body, "Carrollton", link))
                 except Exception as e:
                     log.warning("Carrollton link %s: %s", link, e)
+            browser.close()
     except Exception as e:
         log.error("Carrollton: %s", e)
 
-    if not rows:
-        log.warning("Carrollton: no data extracted (may need Playwright)")
+    log.info("Carrollton: %d rows", len(rows))
     if rows:
         write_city("Carrollton", rows)
     return rows

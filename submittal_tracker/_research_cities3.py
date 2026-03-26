@@ -1,102 +1,175 @@
-"""Research cities - Socrata and web portal searches."""
+"""Research remaining city APIs: Dallas, Corpus Christi, Grand Prairie, Round Rock, Carrollton."""
 import httpx
-import json
+import re
 
-# Try Socrata catalog with HTTPS
-print("=== SOCRATA CATALOG ===")
-for city in ["corpus christi", "grand prairie", "round rock", "carrollton"]:
-    try:
-        r = httpx.get("https://api.us.socrata.com/api/catalog/v1",
-            params={"q": f"building permits {city} texas", "limit": 5},
-            timeout=15, follow_redirects=True)
-        print(f"\n[{city}] HTTP {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            for result in data.get("results", [])[:3]:
-                res = result.get("resource", {})
-                dom = result.get("metadata", {}).get("domain", "")
-                name = res.get("name", "")
-                uid = res.get("id", "")
-                print(f"  [{dom}] {name} | {uid}")
-    except Exception as e:
-        print(f"[{city}] Error: {e}")
+client = httpx.Client(follow_redirects=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
 
-# Try direct open data domains
-print("\n\n=== DIRECT OPEN DATA PORTALS ===")
-domains_to_try = [
-    ("Corpus Christi", "data.cctexas.com"),
-    ("Corpus Christi", "cctexas-admin.data.socrata.com"),
-    ("Grand Prairie", "data.gptx.org"),
-    ("Grand Prairie", "data.grandprairietx.org"),
-    ("Round Rock", "data.roundrocktexas.gov"),
-    ("Carrollton", "data.cityofcarrollton.com"),
-]
+# 1. Dallas Socrata - Building Permits (e7gq-4sah)
+print("=" * 60)
+print("DALLAS - Socrata Building Permits")
+try:
+    r = client.get(
+        "https://www.dallasopendata.com/resource/e7gq-4sah.json",
+        params={
+            "$where": "issued_date >= '2026-01-01T00:00:00'",
+            "$limit": "3",
+            "$order": "issued_date DESC",
+        },
+    )
+    print(f"  Status: {r.status_code}")
+    if r.status_code == 200:
+        data = r.json()
+        print(f"  Rows returned: {len(data)}")
+        if data:
+            print(f"  Keys: {list(data[0].keys())}")
+            print(f"  Sample: {data[0]}")
+    else:
+        print(f"  Error: {r.text[:300]}")
+except Exception as e:
+    print(f"  Exception: {e}")
 
-for city, domain in domains_to_try:
-    try:
-        r = httpx.get(f"https://{domain}", timeout=10, follow_redirects=True)
-        print(f"  [{city}] {domain}: HTTP {r.status_code}")
-    except Exception as e:
-        print(f"  [{city}] {domain}: {type(e).__name__}")
+# Also try getting just the count
+try:
+    r = client.get(
+        "https://www.dallasopendata.com/resource/e7gq-4sah.json",
+        params={
+            "$where": "issued_date >= '2026-01-01T00:00:00'",
+            "$select": "count(*) as cnt",
+        },
+    )
+    if r.status_code == 200:
+        print(f"  Total 2026 count: {r.json()}")
+except Exception as e:
+    print(f"  Count error: {e}")
 
-# Try ArcGIS Hub search more specifically
-print("\n\n=== ARCGIS HUB - Targeted org searches ===")
-# Search for each city's org on ArcGIS
-for city, org_patterns in [
-    ("Corpus Christi", ["corpus christi", "cctexas"]),
-    ("Grand Prairie", ["grand prairie", "gptx"]),
-    ("Round Rock", ["round rock"]),
-    ("Carrollton", ["carrollton"]),
+# 2. Corpus Christi - check for open data / Socrata
+print("\n" + "=" * 60)
+print("CORPUS CHRISTI - Open Data")
+for url in [
+    "https://www.cctexas.com/departments/development-services/reports",
+    "https://www.corpuschristitx.gov/department:directory/development:services/reports/fiscal:permit:history:reports:by:month/",
 ]:
-    for pat in org_patterns:
-        try:
-            r = httpx.get("https://hub.arcgis.com/api/v3/datasets",
-                params={"q": f"permits {pat}", "page[size]": 5},
-                timeout=15)
-            data = r.json()
-            found = False
-            for item in data.get("data", []):
-                attrs = item.get("attributes", {})
-                org = attrs.get("organization", "").lower()
-                name = attrs.get("name", "")
-                url = attrs.get("url", "")
-                if pat.replace(" ", "") in org.replace(" ", "") or pat in org:
-                    found = True
-                    print(f"  [{city}] {name} | org={attrs.get('organization','')} | {url}")
-            if not found:
-                # Check if any of the results mention the city
-                for item in data.get("data", []):
-                    attrs = item.get("attributes", {})
-                    name = attrs.get("name", "").lower()
-                    if pat.split()[0] in name:
-                        print(f"  [{city}] {attrs.get('name','')} | org={attrs.get('organization','')} | {attrs.get('url','')}")
-        except Exception as e:
-            print(f"  [{city}] Error searching '{pat}': {e}")
-
-# Check if Grand Prairie has an ArcGIS org
-print("\n\n=== GRAND PRAIRIE - ArcGIS REST ===")
-# Grand Prairie often uses gptx.org
-gp_urls = [
-    "https://gis.gptx.org/server/rest/services",
-    "https://maps.gptx.org/server/rest/services",
-    "https://gis.gptx.org/portal/sharing/rest/search",
-]
-for url in gp_urls:
     try:
-        params = {"f": "json"} if "search" not in url else {"q": "permits", "f": "json", "num": 5}
-        r = httpx.get(url, params=params, timeout=10)
-        print(f"  {url}: HTTP {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            if "services" in data:
-                for svc in data["services"][:5]:
-                    print(f"    {svc.get('name')} | {svc.get('type')}")
-            if "folders" in data:
-                print(f"    Folders: {data['folders'][:10]}")
-            if "results" in data:
-                for res in data["results"][:5]:
-                    print(f"    {res.get('title')} | {res.get('type')}")
+        r = client.get(url)
+        print(f"  {url[:80]}... => {r.status_code}")
+        if r.status_code == 200 and len(r.text) > 100:
+            links = re.findall(r'href=["\']([^"\']*(?:permit|report|2026)[^"\']*)["\']', r.text, re.I)
+            if links:
+                print(f"  Found {len(links)} relevant links:")
+                for l in links[:15]:
+                    print(f"    {l}")
     except Exception as e:
-        print(f"  {url}: {type(e).__name__}")
+        print(f"  {url[:80]}... => {e}")
 
-print("\nDone!")
+# Socrata catalog search for CC
+try:
+    r = client.get("https://api.us.socrata.com/api/catalog/v1",
+        params={"q": "permits corpus christi texas", "limit": 5})
+    if r.status_code == 200:
+        for result in r.json().get("results", [])[:5]:
+            res = result.get("resource", {})
+            dom = result.get("metadata", {}).get("domain", "")
+            print(f"  Socrata: [{dom}] {res.get('name','')} | {res.get('id','')}")
+except:
+    pass
+
+# 3. Grand Prairie
+print("\n" + "=" * 60)
+print("GRAND PRAIRIE")
+try:
+    r = client.get("https://www.gptx.org/Departments/Building-Inspections/Building-Permits-Report")
+    print(f"  Building Permits Report page: {r.status_code}")
+    if r.status_code == 200:
+        links = re.findall(r'href=["\']([^"\']*(?:permit|report|building)[^"\']*\.(?:xlsx|xls|pdf|csv))["\']', r.text, re.I)
+        if links:
+            print(f"  Download links: {links[:10]}")
+        links2 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', r.text, re.I)
+        if links2:
+            print(f"  2026 links: {links2[:10]}")
+        # Show page snippet
+        import html
+        text = re.sub(r'<[^>]+>', ' ', r.text)
+        text = re.sub(r'\s+', ' ', text)
+        for kw in ['2026', '2025', 'permit', 'report', 'download']:
+            idx = text.lower().find(kw)
+            if idx >= 0:
+                print(f"  Context for '{kw}': ...{text[max(0,idx-80):idx+80]}...")
+except Exception as e:
+    print(f"  Error: {e}")
+
+# ArcGIS Hub search for Grand Prairie
+try:
+    r = client.get("https://hub.arcgis.com/api/v3/datasets",
+        params={"q": "permits grand prairie texas", "page[size]": 5})
+    if r.status_code == 200:
+        for item in r.json().get("data", [])[:5]:
+            attrs = item.get("attributes", {})
+            print(f"  Hub: {attrs.get('name','')} | org={attrs.get('organization','')} | {attrs.get('url','')[:80]}")
+except:
+    pass
+
+# 4. Round Rock
+print("\n" + "=" * 60)
+print("ROUND ROCK")
+try:
+    r = client.get("https://www.roundrocktexas.gov/city-departments/planning-and-development-services/building-inspection/forms-and-reports/")
+    print(f"  Forms page: {r.status_code}")
+    if r.status_code == 200:
+        links = re.findall(r'href=["\']([^"\']*\.(?:xlsx|xls|pdf|csv))["\']', r.text, re.I)
+        if links:
+            print(f"  Download links ({len(links)}): {links[:10]}")
+        links2 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', r.text, re.I)
+        if links2:
+            print(f"  2026 links: {links2[:10]}")
+        text = re.sub(r'<[^>]+>', ' ', r.text)
+        text = re.sub(r'\s+', ' ', text)
+        for kw in ['2026', 'permit', 'report', 'monthly']:
+            idx = text.lower().find(kw)
+            if idx >= 0:
+                print(f"  Context for '{kw}': ...{text[max(0,idx-80):idx+80]}...")
+                break
+except Exception as e:
+    print(f"  Error: {e}")
+
+# ArcGIS Hub search for Round Rock
+try:
+    r = client.get("https://hub.arcgis.com/api/v3/datasets",
+        params={"q": "permits round rock texas", "page[size]": 5})
+    if r.status_code == 200:
+        for item in r.json().get("data", [])[:5]:
+            attrs = item.get("attributes", {})
+            print(f"  Hub: {attrs.get('name','')} | org={attrs.get('organization','')} | {attrs.get('url','')[:80]}")
+except:
+    pass
+
+# 5. Carrollton
+print("\n" + "=" * 60)
+print("CARROLLTON")
+try:
+    r = client.get("https://www.cityofcarrollton.com/departments/departments-a-f/building-inspection/building-inspection-reports/archive-permit-reports")
+    print(f"  Archive page: {r.status_code}")
+    if r.status_code == 200:
+        links = re.findall(r'href=["\']([^"\']*(?:permit|report|2026)[^"\']*)["\']', r.text, re.I)
+        if links:
+            print(f"  Relevant links ({len(links)}):")
+            for l in links[:15]:
+                print(f"    {l}")
+        dl = re.findall(r'href=["\']([^"\']*\.(?:xlsx|xls|pdf|csv))["\']', r.text, re.I)
+        if dl:
+            print(f"  Download links: {dl[:10]}")
+except Exception as e:
+    print(f"  Error: {e}")
+
+# ArcGIS Hub search for Carrollton
+try:
+    r = client.get("https://hub.arcgis.com/api/v3/datasets",
+        params={"q": "permits carrollton texas", "page[size]": 5})
+    if r.status_code == 200:
+        for item in r.json().get("data", [])[:5]:
+            attrs = item.get("attributes", {})
+            print(f"  Hub: {attrs.get('name','')} | org={attrs.get('organization','')} | {attrs.get('url','')[:80]}")
+except:
+    pass
+
+client.close()
+print("\nDone.")
