@@ -1159,45 +1159,89 @@ def run_round_rock():
 
 # ── 13. CARROLLTON ────────────────────────────────────────────────────────────
 def run_carrollton():
-    """Carrollton: archive permit reports page (Playwright for 403 bypass)."""
-    from playwright.sync_api import sync_playwright
-    log.info("Carrollton: fetching archive permit reports via Playwright …")
+    """Carrollton: monthly permit reports from webrpts subdomain (direct PDF)."""
+    log.info("Carrollton: fetching monthly permit report PDFs …")
+    BASE = "https://webrpts.cityofcarrollton.com/bldg_insp/results/permit_reports/archive"
+    PDF_URLS = [
+        f"{BASE}/01_01_26%20THRU%2001_31_26.pdf",
+        f"{BASE}/02_01_26%20THRU%2002_28_26.pdf",
+    ]
+    client = _http()
     rows: list[list[str]] = []
-    url = "https://www.cityofcarrollton.com/departments/departments-a-f/building-inspection/building-inspection-reports/archive-permit-reports"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context()
-            page = ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(3000)
-            html = page.content()
-
-            links = re.findall(r'href=["\']([^"\']*\.(?:xlsx|xls|pdf|csv))["\']', html, re.I)
-            links_2026 = re.findall(r'href=["\']([^"\']*2026[^"\']*)["\']', html, re.I)
-            all_links = list({l for l in (links + links_2026)})
-            for link in all_links:
-                if not link.startswith("http"):
-                    link = f"https://www.cityofcarrollton.com{link}"
-                if "2026" not in link and "26" not in link.split("/")[-1]:
-                    continue
-                log.info("Carrollton: found link %s", link)
-                try:
-                    resp = ctx.request.get(link)
-                    if resp.status != 200:
-                        log.warning("Carrollton: %s → %s", link, resp.status)
-                        continue
-                    body = resp.body()
-                    ct = resp.headers.get("content-type", "")
-                    if "spreadsheet" in ct or "excel" in ct or link.endswith(('.xlsx', '.xls')):
-                        rows.extend(_parse_excel_generic(body, "Carrollton", link))
-                    elif "pdf" in ct or link.endswith('.pdf'):
-                        rows.extend(_parse_pdf_generic(body, "Carrollton", link))
-                except Exception as e:
-                    log.warning("Carrollton link %s: %s", link, e)
-            browser.close()
-    except Exception as e:
-        log.error("Carrollton: %s", e)
+    for url in PDF_URLS:
+        try:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                log.warning("Carrollton %s → %s", url.split("/")[-1], resp.status_code)
+                continue
+            with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if not table:
+                            continue
+                        # Find header row (contains 'Permit Number')
+                        hdr_idx = None
+                        for i, row in enumerate(table):
+                            joined = " ".join(safe(c).lower() for c in row)
+                            if "permit number" in joined or "permit type" in joined:
+                                hdr_idx = i
+                                break
+                        if hdr_idx is None:
+                            continue
+                        headers = [safe(c).lower().replace("\n", " ") for c in table[hdr_idx]]
+                        def _ci(kws):
+                            for kw in kws:
+                                for j, h in enumerate(headers):
+                                    if kw in h:
+                                        return j
+                            return None
+                        ci_perm = _ci(["permit number"])
+                        ci_type = _ci(["permit type"])
+                        ci_addr = _ci(["property address", "address"])
+                        ci_desc = _ci(["job description", "description"])
+                        ci_appl = _ci(["applicant"])
+                        ci_val  = _ci(["valuation"])
+                        ci_stat = _ci(["permit status", "status"])
+                        ci_date = _ci(["date issued"])
+                        for row in table[hdr_idx + 1:]:
+                            if not row or not any(row):
+                                continue
+                            def _g(idx):
+                                if idx is not None and idx < len(row):
+                                    return safe(row[idx]).replace("\n", " ")
+                                return ""
+                            permit = _g(ci_perm)
+                            if not permit:
+                                continue
+                            issued = _g(ci_date)
+                            dt = parse_date(issued)
+                            if dt and dt < CUTOFF:
+                                continue
+                            ptype = _g(ci_type)
+                            addr = _g(ci_addr)
+                            addr = re.sub(r'\s*CADID:.*', '', addr)
+                            addr = re.sub(r'\s*County:.*', '', addr)
+                            desc = _g(ci_desc)[:200]
+                            val = _g(ci_val)
+                            status = _g(ci_stat)
+                            applicant = _g(ci_appl)
+                            notes_parts = []
+                            if val:
+                                notes_parts.append(f"Val={val}")
+                            if applicant:
+                                notes_parts.append(f"Applicant={applicant}")
+                            rows.append([
+                                permit, ptype, addr.strip(), desc,
+                                status.replace("\n", " "),
+                                fmt_date(dt) if dt else issued,
+                                "; ".join(notes_parts),
+                                url.split("/")[-1],
+                                priority(f"{ptype} {desc}"),
+                            ])
+            log.info("Carrollton: parsed %s", url.split("/")[-1])
+        except Exception as e:
+            log.warning("Carrollton %s: %s", url.split("/")[-1], e)
 
     log.info("Carrollton: %d rows", len(rows))
     if rows:
@@ -1207,29 +1251,103 @@ def run_carrollton():
 
 # ── 14. KILLEEN ───────────────────────────────────────────────────────────────
 def run_killeen():
-    """Killeen: CivicPlus Archive.aspx monthly permit reports.
-    Note: Archive only has data up to Nov 2022 as of last check.
-    """
-    log.info("Killeen: checking CivicPlus archive …")
-    # The archive page only goes to Nov 2022. Check DocumentCenter for newer reports.
-    client = _http()
-    rows = []
-    # Try DocumentCenter for 2026 reports
-    alt_urls = [
+    """Killeen: monthly permit report PDF from DocumentCenter."""
+    log.info("Killeen: fetching monthly permit report …")
+    PDF_URLS = [
         "https://www.killeentexas.gov/DocumentCenter/View/7781/Monthly-Permit-Report-PDF",
     ]
-    for url in alt_urls:
+    client = _http()
+    rows: list[list[str]] = []
+    for url in PDF_URLS:
         try:
             resp = client.get(url)
-            if resp.status_code == 200:
-                ct = resp.headers.get("content-type", "")
-                if "pdf" in ct:
-                    rows.extend(_parse_pdf_generic(resp.content, "Killeen", url))
+            if resp.status_code != 200:
+                log.warning("Killeen %s → %s", url, resp.status_code)
+                continue
+            # Persistent column indices + last_type across all pages
+            ci_type = ci_perm = ci_desc = ci_addr = ci_cont = None
+            ci_sqft = ci_date = ci_val = ci_fees = None
+            cols_found = False
+            last_type = ""
+            with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if not table:
+                            continue
+                        # Try to find header row on this page
+                        hdr_idx = None
+                        for i, row in enumerate(table):
+                            joined = " ".join(safe(c).lower() for c in row)
+                            if "permit" in joined and ("type" in joined or "#" in joined):
+                                hdr_idx = i
+                                break
+                        if hdr_idx is not None:
+                            headers = [safe(c).lower().replace("\n", " ") for c in table[hdr_idx]]
+                            def _ci(kws):
+                                for kw in kws:
+                                    for j, h in enumerate(headers):
+                                        if kw in h:
+                                            return j
+                                return None
+                            ci_type = _ci(["type"])
+                            ci_perm = _ci(["permit #", "permit"])
+                            ci_desc = _ci(["project description", "description"])
+                            ci_addr = _ci(["address"])
+                            ci_cont = _ci(["contractor"])
+                            ci_sqft = _ci(["total sq"])
+                            ci_date = _ci(["date"])
+                            ci_val  = _ci(["valuation", "project valuation"])
+                            ci_fees = _ci(["fees"])
+                            cols_found = True
+                            data_rows = table[hdr_idx + 1:]
+                        elif cols_found:
+                            # No header on this page — reuse saved indices
+                            data_rows = table
+                        else:
+                            continue
+                        for row in data_rows:
+                            if not row or not any(row):
+                                continue
+                            def _g(idx):
+                                if idx is not None and idx < len(row):
+                                    v = safe(row[idx]).replace("\n", " ")
+                                    return v
+                                return ""
+                            ptype = _g(ci_type) or last_type
+                            if _g(ci_type):
+                                last_type = ptype
+                            permit = _g(ci_perm)
+                            if not permit:
+                                continue
+                            date_s = _g(ci_date)
+                            dt = parse_date(date_s)
+                            if dt and dt < CUTOFF:
+                                continue
+                            addr = _g(ci_addr)
+                            desc = _g(ci_desc)[:200]
+                            val = _g(ci_val)
+                            fees = _g(ci_fees)
+                            contractor = _g(ci_cont)
+                            notes_parts = []
+                            if val:
+                                notes_parts.append(f"Val={val}")
+                            if fees:
+                                notes_parts.append(f"Fees={fees}")
+                            if contractor:
+                                notes_parts.append(f"Contractor={contractor}")
+                            rows.append([
+                                permit, ptype, addr, desc, "",
+                                fmt_date(dt) if dt else date_s,
+                                "; ".join(notes_parts),
+                                "Killeen Monthly Permit Report",
+                                priority(f"{ptype} {desc}"),
+                            ])
+            log.info("Killeen: parsed %s", url.split("/")[-1])
         except Exception as e:
             log.warning("Killeen %s: %s", url, e)
 
-    if not rows:
-        log.warning("Killeen: no 2026 data found (archive stops at Nov 2022)")
+    log.info("Killeen: %d rows", len(rows))
     if rows:
         write_city("Killeen", rows)
     return rows
